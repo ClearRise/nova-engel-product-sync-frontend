@@ -1,36 +1,21 @@
-import { useState } from 'react'
 import './App.css'
-import Header from './components/Header'
-import ShopifyProducts from './components/ShopifyProducts'
+import ErrorBoundary from './components/ErrorBoundary'
 import NovaEngelProducts from './components/NovaEngelProducts'
+import NotificationContainer from './components/Notification'
 
 function App() {
-  const [currentPage, setCurrentPage] = useState('nova-engel')
-  const [showAlert, setShowAlert] = useState(false)
-  const [priceRate, setPriceRate] = useState(1)
-
-  const handlePageChange = (page) => {
-    setCurrentPage(page)
-  }
-
-  const handlePriceRateUpdate = (newRate) => {
-    setPriceRate(newRate)
-  }
-
+  console.log('App component rendering...')
+  
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <Header 
-        currentPage={currentPage} 
-        onPageChange={handlePageChange} 
-        showAlert={showAlert}
-        onPriceRateUpdate={handlePriceRateUpdate}
-      />
-
-      {/* Page Content */}
-      {currentPage === 'shopify' && <ShopifyProducts />}
-      {currentPage === 'nova-engel' && <NovaEngelProducts priceRate={priceRate} />}
-    </div>
+    <ErrorBoundary>
+      <div className="h-screen bg-gray-50 overflow-hidden">
+        {/* Page Content */}
+        <NovaEngelProducts />
+        
+        {/* Notification Container */}
+        <NotificationContainer />
+      </div>
+    </ErrorBoundary>
   )
 }
 

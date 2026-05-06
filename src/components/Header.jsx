@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import PriceRateModal from './PriceRateModal'
+import { apiFetch } from '../apiClient'
 
 function Header({ currentPage, onPageChange, showAlert, onPriceRateUpdate }) {
   const [priceRate, setPriceRate] = useState(1);
@@ -13,7 +14,7 @@ function Header({ currentPage, onPageChange, showAlert, onPriceRateUpdate }) {
   const fetchPriceRate = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/price-rate');
+      const response = await apiFetch('/api/price-rate');
       const data = await response.json();
       
       if (data.success) {
@@ -37,8 +38,8 @@ function Header({ currentPage, onPageChange, showAlert, onPriceRateUpdate }) {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
           <div className="flex items-center">
-            <h1 className="text-xl font-semibold text-gray-900 mr-8">
-              Product Update App
+          <h1 className="text-xl font-semibold text-gray-900 mr-8">
+              NovaEngel Sync
             </h1>
             
             {/* Navigation */}

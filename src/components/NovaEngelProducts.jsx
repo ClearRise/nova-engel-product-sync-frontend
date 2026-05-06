@@ -1,6 +1,12 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { apiFetch } from '../apiClient'
+import { showNotification } from './Notification'
+import PriceRateModal from './PriceRateModal'
 
-function NovaEngelProducts({ priceRate = 1 }) {
+function NovaEngelProducts() {
+  const [priceRate, setPriceRate] = useState(1);
+  const [isPriceRateModalOpen, setIsPriceRateModalOpen] = useState(false);
+  const [priceRateLoading, setPriceRateLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState(1)
   const [fetchedProducts, setFetchedProducts] = useState([])
   const [isLoading, setIsLoading] = useState(false)
@@ -27,14 +33,24 @@ function NovaEngelProducts({ priceRate = 1 }) {
   const [searchPage, setSearchPage] = useState(1);
   const [searchItemsPerPage, setSearchItemsPerPage] = useState(100);
   const [brandInput, setBrandInput] = useState('');
-  const [brandSuggestions, setBrandSuggestions] = useState([]);
   const [showBrandSuggestions, setShowBrandSuggestions] = useState(false);
   const [categoryInput, setCategoryInput] = useState('');
-  const [categorySuggestions, setCategorySuggestions] = useState([]);
   const [showCategorySuggestions, setShowCategorySuggestions] = useState(false);
   const brandInputRef = useRef();
   const categoryInputRef = useRef();
   const [searchPageInput, setSearchPageInput] = useState(1);
+  const [statusFilter, setStatusFilter] = useState('all');
+  
+  // Bulk registration states
+  const [isRegisteringAll, setIsRegisteringAll] = useState(false);
+  const [isRegisteringByCategory, setIsRegisteringByCategory] = useState(false);
+  const [isRegisteringByBrand, setIsRegisteringByBrand] = useState(false);
+  const [isRegisteringByFilter, setIsRegisteringByFilter] = useState(false);
+  const [bulkRegistrationProgress, setBulkRegistrationProgress] = useState(null);
+  const [abortController, setAbortController] = useState(null);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [totalProductCount, setTotalProductCount] = useState(null); // Total product count from Nova Engel
+  const [isDeletingBulk, setIsDeletingBulk] = useState(false);
 
   // Check if product is already registered
   const isProductRegistered = (productId) => {
@@ -46,11 +62,268 @@ function NovaEngelProducts({ priceRate = 1 }) {
     return (parseFloat(originalPrice || 0) * priceRate).toFixed(2);
   };
 
+  // Cancel bulk registration
+  const handleCancelRegistration = () => {
+    if (abortController) {
+      setIsCancelling(true);
+      abortController.abort();
+      setAbortController(null);
+      setIsRegisteringAll(false);
+      setIsRegisteringByCategory(false);
+      setIsRegisteringByBrand(false);
+      setIsRegisteringByFilter(false);
+      setBulkRegistrationProgress(null);
+      setFetchError('Registration cancelled by user');
+      setIsCancelling(false);
+    }
+  };
+
+  // Register all products
+  const handleRegisterAllProducts = async () => {
+    if (!confirm('Are you sure you want to register ALL products from Nova Engel to Shopify? This may take a long time.')) {
+      return;
+    }
+    
+    const controller = new AbortController();
+    setAbortController(controller);
+    setIsRegisteringAll(true);
+    setBulkRegistrationProgress({ message: 'Starting registration of all products...', current: 0, total: 0 });
+    setFetchError(null);
+    
+    try {
+      const response = await apiFetch('/api/register-all-products', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        signal: controller.signal,
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to register all products');
+      }
+      
+      const data = await response.json();
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      setBulkRegistrationProgress(null);
+      showNotification(
+        `Registration completed!\n\nTotal: ${data.summary.total}\nAlready registered: ${data.summary.alreadyRegistered}\nNewly registered: ${data.summary.registered}\nFailed: ${data.summary.failed}`,
+        'success',
+        8000
+      );
+      
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setFetchError('Registration cancelled');
+        showNotification('Registration cancelled by user', 'warning', 5000);
+      } else {
+        console.error('Failed to register all products:', error);
+        setFetchError(`Registration failed: ${error.message}`);
+        showNotification(`Registration failed: ${error.message}`, 'error', 8000);
+      }
+    } finally {
+      setIsRegisteringAll(false);
+      setBulkRegistrationProgress(null);
+      setAbortController(null);
+    }
+  };
+
+  // Register products by category
+  const handleRegisterByCategory = async (category) => {
+    if (!category) {
+      setFetchError('Please select a category');
+      return;
+    }
+    
+    if (!confirm(`Are you sure you want to register all products in category "${category}" to Shopify?`)) {
+      return;
+    }
+    
+    const controller = new AbortController();
+    setAbortController(controller);
+    setIsRegisteringByCategory(true);
+    setBulkRegistrationProgress({ message: `Registering products in category "${category}"...`, current: 0, total: 0 });
+    setFetchError(null);
+    
+    try {
+      const response = await apiFetch('/api/register-products-by-category', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ category }),
+        signal: controller.signal,
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to register products by category');
+      }
+      
+      const data = await response.json();
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      setBulkRegistrationProgress(null);
+      showNotification(
+        `Registration completed!\n\nTotal in category: ${data.summary.total}\nAlready registered: ${data.summary.alreadyRegistered}\nNewly registered: ${data.summary.registered}\nFailed: ${data.summary.failed}`,
+        'success',
+        8000
+      );
+      
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setFetchError('Registration cancelled');
+        showNotification('Registration cancelled by user', 'warning', 5000);
+      } else {
+        console.error('Failed to register products by category:', error);
+        setFetchError(`Registration failed: ${error.message}`);
+        showNotification(`Registration failed: ${error.message}`, 'error', 8000);
+      }
+    } finally {
+      setIsRegisteringByCategory(false);
+      setBulkRegistrationProgress(null);
+      setAbortController(null);
+    }
+  };
+
+  // Register products by brand
+  const handleRegisterByBrand = async (brand) => {
+    if (!brand) {
+      setFetchError('Please select a brand');
+      return;
+    }
+    
+    if (!confirm(`Are you sure you want to register all products for brand "${brand}" to Shopify?`)) {
+      return;
+    }
+    
+    const controller = new AbortController();
+    setAbortController(controller);
+    setIsRegisteringByBrand(true);
+    setBulkRegistrationProgress({ message: `Registering products for brand "${brand}"...`, current: 0, total: 0 });
+    setFetchError(null);
+    
+    try {
+      const response = await apiFetch('/api/register-products-by-brand', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ brand }),
+        signal: controller.signal,
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to register products by brand');
+      }
+      
+      const data = await response.json();
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      setBulkRegistrationProgress(null);
+      showNotification(
+        `Registration completed!\n\nTotal for brand: ${data.summary.total}\nAlready registered: ${data.summary.alreadyRegistered}\nNewly registered: ${data.summary.registered}\nFailed: ${data.summary.failed}`,
+        'success',
+        8000
+      );
+      
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setFetchError('Registration cancelled');
+        showNotification('Registration cancelled by user', 'warning', 5000);
+      } else {
+        console.error('Failed to register products by brand:', error);
+        setFetchError(`Registration failed: ${error.message}`);
+        showNotification(`Registration failed: ${error.message}`, 'error', 8000);
+      }
+    } finally {
+      setIsRegisteringByBrand(false);
+      setBulkRegistrationProgress(null);
+      setAbortController(null);
+    }
+  };
+
+  // Register products by filter (category and/or brand)
+  const handleRegisterByFilter = async () => {
+    if (!searchCategory && !searchBrand) {
+      setFetchError('Please select at least one filter (category or brand)');
+      return;
+    }
+    
+    const filterDesc = [];
+    if (searchCategory) filterDesc.push(`category "${searchCategory}"`);
+    if (searchBrand) filterDesc.push(`brand "${searchBrand}"`);
+    
+    if (!confirm(`Are you sure you want to register all products matching ${filterDesc.join(' and ')} to Shopify?`)) {
+      return;
+    }
+    
+    const controller = new AbortController();
+    setAbortController(controller);
+    setIsRegisteringByFilter(true);
+    setBulkRegistrationProgress({ message: `Registering products matching filters...`, current: 0, total: 0 });
+    setFetchError(null);
+    
+    try {
+      const response = await apiFetch('/api/register-products-by-filter', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          category: searchCategory || undefined,
+          brand: searchBrand || undefined
+        }),
+        signal: controller.signal,
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to register products by filter');
+      }
+      
+      const data = await response.json();
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      setBulkRegistrationProgress(null);
+      showNotification(
+        `Registration completed!\n\nTotal matching filters: ${data.summary.total}\nAlready registered: ${data.summary.alreadyRegistered}\nNewly registered: ${data.summary.registered}\nFailed: ${data.summary.failed}`,
+        'success',
+        8000
+      );
+      
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        setFetchError('Registration cancelled');
+        showNotification('Registration cancelled by user', 'warning', 5000);
+      } else {
+        console.error('Failed to register products by filter:', error);
+        setFetchError(`Registration failed: ${error.message}`);
+        showNotification(`Registration failed: ${error.message}`, 'error', 8000);
+      }
+    } finally {
+      setIsRegisteringByFilter(false);
+      setBulkRegistrationProgress(null);
+      setAbortController(null);
+    }
+  };
+
   // Fetch registered products from Shopify
   const fetchRegisteredProducts = async () => {
     setIsLoadingRegisteredProducts(true);
     try {
-      const response = await fetch('/api/registered-products');
+      const response = await apiFetch('/api/registered-products');
       if (!response.ok) {
         throw new Error(`Failed to fetch registered products: ${response.statusText}`);
       }
@@ -64,13 +337,157 @@ function NovaEngelProducts({ priceRate = 1 }) {
     }
   };
 
+  // Unregister selected registered products from Shopify
+  const handleDeleteSelected = async () => {
+    // Filter to only registered products
+    const registeredSelected = selectedProducts.filter(id => isProductRegistered(id));
+    
+    if (registeredSelected.length === 0) {
+      showNotification('Please select registered products to unregister', 'warning', 5000);
+      return;
+    }
+    
+    if (!confirm(`Are you sure you want to unregister ${registeredSelected.length} registered product(s) from Shopify? This action cannot be undone.`)) {
+      return;
+    }
+    
+    setIsDeletingBulk(true);
+    setFetchError(null);
+    
+    try {
+      const response = await apiFetch('/api/products/delete-by-nova-engel-ids', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          novaEngelProductIds: registeredSelected
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete products');
+      }
+      
+      const data = await response.json();
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      // Clear selection
+      setSelectedProducts([]);
+      
+      const { successful, failed } = data.summary;
+      if (failed === 0) {
+        showNotification(`Successfully unregistered ${successful} product(s) from Shopify`, 'success', 5000);
+      } else {
+        showNotification(`Unregistered ${successful} product(s), ${failed} failed`, 'warning', 8000);
+      }
+      
+    } catch (error) {
+      console.error('Failed to unregister products:', error);
+      setFetchError(`Unregistration failed: ${error.message}`);
+      showNotification(`Unregistration failed: ${error.message}`, 'error', 8000);
+    } finally {
+      setIsDeletingBulk(false);
+    }
+  };
+
+  // Unregister all registered products from Shopify
+  const handleDeleteAllRegistered = async () => {
+    if (registeredProductIds.length === 0) {
+      showNotification('No registered products to unregister', 'warning', 5000);
+      return;
+    }
+    
+    if (!confirm(`Are you sure you want to unregister ALL ${registeredProductIds.length} registered product(s) from Shopify? This action cannot be undone.`)) {
+      return;
+    }
+    
+    setIsDeletingBulk(true);
+    setFetchError(null);
+    
+    try {
+      // Process in batches of 100 to avoid exceeding API limits
+      const batchSize = 100;
+      const batches = [];
+      for (let i = 0; i < registeredProductIds.length; i += batchSize) {
+        batches.push(registeredProductIds.slice(i, i + batchSize));
+      }
+      
+      let totalSuccessful = 0;
+      let totalFailed = 0;
+      
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex];
+        
+        const response = await apiFetch('/api/products/delete-by-nova-engel-ids', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            novaEngelProductIds: batch
+          }),
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to delete products');
+        }
+        
+        const data = await response.json();
+        totalSuccessful += data.summary.successful;
+        totalFailed += data.summary.failed;
+        
+        // Show progress for large unregistrations
+        if (batches.length > 1) {
+          showNotification(
+            `Unregistering batch ${batchIndex + 1}/${batches.length}... (${totalSuccessful} unregistered so far)`,
+            'info',
+            3000
+          );
+        }
+      }
+      
+      // Refresh registered products list
+      await fetchRegisteredProducts();
+      
+      // Clear selection
+      setSelectedProducts([]);
+      
+      if (totalFailed === 0) {
+        showNotification(`Successfully unregistered all ${totalSuccessful} registered product(s) from Shopify`, 'success', 5000);
+      } else {
+        showNotification(`Unregistered ${totalSuccessful} product(s), ${totalFailed} failed`, 'warning', 8000);
+      }
+      
+    } catch (error) {
+      console.error('Failed to unregister all products:', error);
+      setFetchError(`Unregistration failed: ${error.message}`);
+      showNotification(`Unregistration failed: ${error.message}`, 'error', 8000);
+    } finally {
+      setIsDeletingBulk(false);
+    }
+  };
+
   // Register selected products to Shopify
   const handleRegisterToShopify = async () => {
     setIsRegistering(true);
     setRegistrationResults([]);
     setFetchError(null);
 
-    const selectedProductDetails = fetchedProducts.filter(p => selectedProducts.includes(p.Id));
+    // Filter to only unregistered products
+    const selectedProductDetails = fetchedProducts.filter(p => 
+      selectedProducts.includes(p.Id) && !isProductRegistered(p.Id)
+    );
+    
+    if (selectedProductDetails.length === 0) {
+      showNotification('No unregistered products selected. Please select products that are not yet registered in Shopify.', 'warning', 5000);
+      setIsRegistering(false);
+      return;
+    }
     
     try {
       // Prepare products data for bulk registration
@@ -92,7 +509,7 @@ function NovaEngelProducts({ priceRate = 1 }) {
       }
 
       // Send all products to backend at once
-      const response = await fetch('/api/register-products-bulk', {
+      const response = await apiFetch('/api/register-products-bulk', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -133,6 +550,7 @@ function NovaEngelProducts({ priceRate = 1 }) {
     } catch (error) {
       console.error('Bulk registration failed:', error);
       setFetchError(`Registration failed: ${error.message}`);
+      showNotification(`Registration failed: ${error.message}`, 'error', 8000);
     } finally {
       setIsRegistering(false);
       setSelectedProducts([]); // Clear selection after registration
@@ -143,11 +561,12 @@ function NovaEngelProducts({ priceRate = 1 }) {
   const fetchNovaEngelProducts = async (page = 1) => {
     setSelectedProducts([]); // Clear selection on new page fetch
     setSearchBarVisible(false);
+    setIsSearching(false); // Reset search state
     setIsLoading(true);
     setFetchError(null);
     
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/novaengel/products?page=${page}&itemsPerPage=${itemsPerPage}&language=en`
       );
 
@@ -160,13 +579,10 @@ function NovaEngelProducts({ priceRate = 1 }) {
       setFetchedProducts(data || []);
       setCurrentPage(page);
       
-      if (data && data.length < itemsPerPage) {
-        // Reached end of data
-      }
-      
     } catch (error) {
       console.error('Error fetching Nova Engel products:', error);
       setFetchError(error.message);
+      // Don't clear products on error, keep what we have
     } finally {
       setIsLoading(false);
     }
@@ -204,11 +620,7 @@ function NovaEngelProducts({ priceRate = 1 }) {
 
   // Handle product selection
   const handleProductSelect = (productId, isSelected) => {
-    // Don't allow selection of already registered products
-    if (isProductRegistered(productId)) {
-      return;
-    }
-    
+    // Allow selection of all products (both registered and unregistered)
     if (isSelected) {
       setSelectedProducts(prev => [...prev, productId]);
     } else {
@@ -218,11 +630,9 @@ function NovaEngelProducts({ priceRate = 1 }) {
 
   const handleSelectAll = (isSelected) => {
     if (isSelected) {
-      // Only select products that are not already registered
-      const selectableProducts = fetchedProducts
-        .filter(product => !isProductRegistered(product.Id))
-        .map(product => product.Id);
-      setSelectedProducts(selectableProducts);
+      // Select all products (both registered and unregistered)
+      const allProductIds = fetchedProducts.map(product => product.Id);
+      setSelectedProducts(allProductIds);
     } else {
       setSelectedProducts([]);
     }
@@ -233,7 +643,10 @@ function NovaEngelProducts({ priceRate = 1 }) {
     setIsLoadingBrands(true);
     setIsLoadingCategories(true);
     try {
-      const res = await fetch('/api/novaengel/brand-category-lists');
+      const res = await apiFetch('/api/novaengel/brand-category-lists');
+      if (!res.ok) {
+        throw new Error(`Failed to refresh lists: ${res.status} ${res.statusText}`);
+      }
       const data = await res.json();
       if (data.success) {
         setBrandList(data.brands);
@@ -244,15 +657,40 @@ function NovaEngelProducts({ priceRate = 1 }) {
     setIsLoadingCategories(false);
   };
 
-  // Show all brands/categories as suggestions when input is focused or changed
+  // Pre-sort brand and category lists for faster filtering
+  const sortedBrandList = useMemo(() => {
+    return [...brandList].sort((a, b) => a.BrandName.localeCompare(b.BrandName));
+  }, [brandList]);
+
+  const sortedCategoryList = useMemo(() => {
+    return [...categoryList].sort((a, b) => a.Name.localeCompare(b.Name));
+  }, [categoryList]);
+
+  // Filter and memoize suggestions based on input
+  const filteredBrandSuggestions = useMemo(() => {
+    if (!brandInput.trim()) return sortedBrandList;
+    const lowerInput = brandInput.toLowerCase();
+    return sortedBrandList.filter(b => 
+      b.BrandName.toLowerCase().includes(lowerInput)
+    );
+  }, [brandInput, sortedBrandList]);
+
+  const filteredCategorySuggestions = useMemo(() => {
+    if (!categoryInput.trim()) return sortedCategoryList;
+    const lowerInput = categoryInput.toLowerCase();
+    return sortedCategoryList.filter(c => 
+      c.Name.toLowerCase().includes(lowerInput)
+    );
+  }, [categoryInput, sortedCategoryList]);
+
+  // Show suggestions when input is focused or changed
   useEffect(() => {
-    setBrandSuggestions(brandList);
-    setShowBrandSuggestions(!!brandInput && brandList.length > 0);
-  }, [brandInput, brandList]);
+    setShowBrandSuggestions(!!brandInput && filteredBrandSuggestions.length > 0);
+  }, [brandInput, filteredBrandSuggestions.length]);
+  
   useEffect(() => {
-    setCategorySuggestions(categoryList);
-    setShowCategorySuggestions(!!categoryInput && categoryList.length > 0);
-  }, [categoryInput, categoryList]);
+    setShowCategorySuggestions(!!categoryInput && filteredCategorySuggestions.length > 0);
+  }, [categoryInput, filteredCategorySuggestions.length]);
 
   // When user selects a suggestion
   const selectBrand = (brand) => {
@@ -280,6 +718,9 @@ function NovaEngelProducts({ priceRate = 1 }) {
   const handleSearch = async (page = 1) => {
     setIsSearching(true);
     setSearchPage(page);
+    setIsLoading(true);
+    setFetchError(null);
+    
     try {
       const params = new URLSearchParams({
         title: searchTitle,
@@ -288,19 +729,20 @@ function NovaEngelProducts({ priceRate = 1 }) {
         page,
         itemsPerPage: searchItemsPerPage
       });
-      setIsLoading(true);
-      const res = await fetch(`/api/novaengel/products/search?${params.toString()}`);
+      const res = await apiFetch(`/api/novaengel/products/search?${params.toString()}`);
       const data = await res.json();
-      if (data.success) {
+      if (data.success && data.products) {
         setFetchedProducts(data.products);
         setSearchTotal(data.total);
       } else {
-        setSearchResults([]);
+        setFetchedProducts([]);
         setSearchTotal(0);
       }
     } catch (e) {
-      setSearchResults([]);
+      console.error('Search failed:', e);
+      setFetchedProducts([]);
       setSearchTotal(0);
+      setFetchError('Search failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -311,10 +753,56 @@ function NovaEngelProducts({ priceRate = 1 }) {
     setSearchTitle('');
     setSearchBrand('');
     setSearchCategory('');
+    setBrandInput('');
+    setCategoryInput('');
     setSearchResults([]);
     setSearchTotal(0);
     setIsSearching(false);
     setSearchPage(1);
+    // Restore normal product list
+    fetchNovaEngelProducts(1);
+  };
+
+  // Fetch price rate on mount
+  useEffect(() => {
+    const fetchPriceRate = async () => {
+      try {
+        setPriceRateLoading(true);
+        const response = await apiFetch('/api/price-rate');
+        const data = await response.json();
+        
+        if (data.success) {
+          setPriceRate(data.rate);
+        }
+      } catch (error) {
+        console.error('Failed to fetch price rate:', error);
+      } finally {
+        setPriceRateLoading(false);
+      }
+    };
+    
+    fetchPriceRate();
+  }, []);
+
+  // Fetch total product count
+  const fetchTotalProductCount = async () => {
+    try {
+      const response = await apiFetch('/api/novaengel/products/total-count');
+      if (!response.ok) {
+        throw new Error(`Failed to fetch total count: ${response.status} ${response.statusText}`);
+      }
+      const data = await response.json();
+      
+      if (data.success) {
+        setTotalProductCount(data.totalCount);
+      }
+    } catch (error) {
+      console.error('Failed to fetch total product count:', error);
+    }
+  };
+
+  const handlePriceRateUpdate = (newRate) => {
+    setPriceRate(newRate);
   };
 
   // Load products and registered products on component mount
@@ -326,6 +814,11 @@ function NovaEngelProducts({ priceRate = 1 }) {
     };
     initializeData();
   }, []);
+
+  // Calculate total pages based on total product count
+  const totalPages = totalProductCount ? Math.ceil(totalProductCount / itemsPerPage) : null;
+
+  const isAnyRegistrationRunning = isRegisteringAll || isRegisteringByCategory || isRegisteringByBrand || isRegisteringByFilter || isRegistering;
 
   // For pagination in search mode
   const handleSearchPageChange = (page) => {
@@ -340,170 +833,384 @@ function NovaEngelProducts({ priceRate = 1 }) {
   }, [searchPage]);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-        {/* Search Bar Toggle */}
-        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-          <h2 className="text-lg font-medium text-gray-900">Nova Engel Product Search</h2>
-          <button
-            className="text-blue-600 text-sm underline focus:outline-none"
-            onClick={() => setSearchBarVisible(v => !v)}
-          >
-            {searchBarVisible ? 'Hide Search' : 'Show Search'}
-          </button>
-        </div>
-        {/* Search Bar */}
-        {searchBarVisible && (
-          <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-            <form
-              className="flex flex-wrap gap-4 items-end"
-              onSubmit={e => { e.preventDefault(); handleSearch(searchPageInput); }}
-              autoComplete="off"
+    <div className="flex h-screen overflow-hidden">
+      {/* Sidebar */}
+      <div className="w-80 bg-white border-r border-gray-200 flex flex-col overflow-y-auto">
+        <div className="p-4 space-y-4">
+          <h2 className="text-lg font-semibold text-gray-900 border-b pb-2">Controls</h2>
+          
+          {/* Search Section */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium text-gray-700">Search & Filter</h3>
+            
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Product Title</label>
+              <input
+                type="text"
+                value={searchTitle}
+                onChange={e => setSearchTitle(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter product title"
+              />
+            </div>
+            
+            <div className="relative">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Brand</label>
+              <input
+                type="text"
+                value={brandInput}
+                onChange={e => { setBrandInput(e.target.value); setSearchBrand(e.target.value); }}
+                onFocus={() => setShowBrandSuggestions(filteredBrandSuggestions.length > 0)}
+                onBlur={() => setTimeout(() => setShowBrandSuggestions(false), 100)}
+                ref={brandInputRef}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Type to search brand"
+                autoComplete="off"
+              />
+              {showBrandSuggestions && (
+                <ul className="absolute z-10 bg-white border border-gray-300 rounded-md mt-1 w-full max-h-40 overflow-y-auto shadow-lg">
+                  {filteredBrandSuggestions.map((b) => (
+                    <li
+                      key={b.BrandName}
+                      className="px-3 py-2 cursor-pointer hover:bg-blue-100 text-sm"
+                      onMouseDown={() => selectBrand(b)}
+                    >
+                      {b.BrandName}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            
+            <div className="relative">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
+              <input
+                type="text"
+                value={categoryInput}
+                onChange={e => { setCategoryInput(e.target.value); setSearchCategory(e.target.value); }}
+                onFocus={() => setShowCategorySuggestions(filteredCategorySuggestions.length > 0)}
+                onBlur={() => setTimeout(() => setShowCategorySuggestions(false), 100)}
+                ref={categoryInputRef}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Type to search category"
+                autoComplete="off"
+              />
+              {showCategorySuggestions && (
+                <ul className="absolute z-10 bg-white border border-gray-300 rounded-md mt-1 w-full max-h-40 overflow-y-auto shadow-lg">
+                  {filteredCategorySuggestions.map((c) => (
+                    <li
+                      key={c.Name}
+                      className="px-3 py-2 cursor-pointer hover:bg-blue-100 text-sm"
+                      onMouseDown={() => selectCategory(c)}
+                    >
+                      {c.Name}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All Products</option>
+                <option value="registered">Registered Only</option>
+                <option value="pending">Pending Only</option>
+              </select>
+            </div>
+            
+            <div className="flex gap-2">
+              <button 
+                type="button" 
+                onClick={refreshLists} 
+                className="flex-1 px-3 py-2 bg-purple-600 text-white rounded-md text-sm hover:bg-purple-700 disabled:bg-gray-300" 
+                disabled={isLoadingBrands || isLoadingCategories}
+              >
+                {isLoadingBrands || isLoadingCategories ? 'Refreshing...' : 'Refresh Lists'}
+              </button>
+              <button 
+                type="button" 
+                onClick={() => handleSearch(1)} 
+                className="flex-1 px-3 py-2 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700"
+              >
+                Search
+              </button>
+            </div>
+          </div>
+
+          {/* Bulk Registration Section */}
+          <div className="space-y-3 pt-4 border-t">
+            <h3 className="text-sm font-medium text-gray-700">Bulk Registration</h3>
+            
+            <button
+              type="button"
+              onClick={handleRegisterAllProducts}
+              disabled={isAnyRegistrationRunning}
+              className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                isAnyRegistrationRunning
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-purple-600 text-white hover:bg-purple-700'
+              }`}
             >
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Product Title</label>
-                <input
-                  type="text"
-                  value={searchTitle}
-                  onChange={e => setSearchTitle(e.target.value)}
-                  className="px-2 py-1 border border-gray-300 rounded-md text-sm"
-                  placeholder="Enter product title"
-                />
-              </div>
-              <div className="relative">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Brand</label>
-                <input
-                  type="text"
-                  value={brandInput}
-                  onChange={e => { setBrandInput(e.target.value); setSearchBrand(e.target.value); }}
-                  onFocus={() => setShowBrandSuggestions(brandList.length > 0)}
-                  onBlur={() => setTimeout(() => setShowBrandSuggestions(false), 100)}
-                  ref={brandInputRef}
-                  className="px-2 py-1 border border-gray-300 rounded-md text-sm w-48"
-                  placeholder="Type to search brand"
-                  autoComplete="off"
-                />
-                {showBrandSuggestions && (
-                  <ul className="absolute z-10 bg-white border border-gray-300 rounded-md mt-1 w-48 max-h-40 overflow-y-auto shadow-lg">
-                    {brandSuggestions.map((b, i) => (
-                      <li
-                        key={b.BrandName + i}
-                        className="px-2 py-1 cursor-pointer hover:bg-blue-100 text-sm"
-                        onMouseDown={() => selectBrand(b)}
-                      >
-                        {b.BrandName}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-              <div className="relative">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
-                <input
-                  type="text"
-                  value={categoryInput}
-                  onChange={e => { setCategoryInput(e.target.value); setSearchCategory(e.target.value); }}
-                  onFocus={() => setShowCategorySuggestions(categoryList.length > 0)}
-                  onBlur={() => setTimeout(() => setShowCategorySuggestions(false), 100)}
-                  ref={categoryInputRef}
-                  className="px-2 py-1 border border-gray-300 rounded-md text-sm w-48"
-                  placeholder="Type to search category"
-                  autoComplete="off"
-                />
-                {showCategorySuggestions && (
-                  <ul className="absolute z-10 bg-white border border-gray-300 rounded-md mt-1 w-48 max-h-40 overflow-y-auto shadow-lg">
-                    {categorySuggestions.map((c, i) => (
-                      <li
-                        key={c.Name + i}
-                        className="px-2 py-1 cursor-pointer hover:bg-blue-100 text-sm"
-                        onMouseDown={() => selectCategory(c)}
-                      >
-                        {c.Name}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Page</label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min="1"
-                    value={searchPageInput}
-                    onChange={e => setSearchPageInput(Number(e.target.value) || 1)}
-                    className="w-16 px-2 py-1 border border-gray-300 rounded-md text-sm"
-                  />
-                  {/* <button
-                    type="button"
-                    onClick={() => handleSearch(searchPageInput)}
-                    className="px-2 py-1 bg-blue-500 text-white rounded-md text-xs hover:bg-blue-600"
-                  >Go</button> */}
+              {isRegisteringAll ? 'Registering All...' : 'Register All Products'}
+            </button>
+
+            {searchCategory && (
+              <button
+                type="button"
+                onClick={() => handleRegisterByCategory(searchCategory)}
+                disabled={isAnyRegistrationRunning}
+                className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                  isAnyRegistrationRunning
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-orange-600 text-white hover:bg-orange-700'
+                }`}
+              >
+                {isRegisteringByCategory ? 'Registering...' : `Register Category: ${searchCategory}`}
+              </button>
+            )}
+
+            {searchBrand && (
+              <button
+                type="button"
+                onClick={() => handleRegisterByBrand(searchBrand)}
+                disabled={isAnyRegistrationRunning}
+                className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                  isAnyRegistrationRunning
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                }`}
+              >
+                {isRegisteringByBrand ? 'Registering...' : `Register Brand: ${searchBrand}`}
+              </button>
+            )}
+
+            {(searchCategory || searchBrand) && (
+              <button
+                type="button"
+                onClick={handleRegisterByFilter}
+                disabled={isAnyRegistrationRunning}
+                className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                  isAnyRegistrationRunning
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-teal-600 text-white hover:bg-teal-700'
+                }`}
+              >
+                {isRegisteringByFilter ? 'Registering...' : 'Register Filtered Products'}
+              </button>
+            )}
+
+            {/* Cancel Button */}
+            {isAnyRegistrationRunning && (
+              <button
+                type="button"
+                onClick={handleCancelRegistration}
+                disabled={isCancelling}
+                className="w-full px-4 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:bg-gray-400"
+              >
+                {isCancelling ? 'Cancelling...' : 'Cancel Registration'}
+              </button>
+            )}
+          </div>
+
+          {/* Selected Products Registration */}
+          <div className="space-y-3 pt-4 border-t">
+            <h3 className="text-sm font-medium text-gray-700">Selected Products</h3>
+            
+            <button
+              type="button"
+              onClick={handleRegisterToShopify}
+              disabled={selectedProducts.filter(id => !isProductRegistered(id)).length === 0 || isAnyRegistrationRunning}
+              className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                selectedProducts.filter(id => !isProductRegistered(id)).length === 0 || isAnyRegistrationRunning
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-green-600 text-white hover:bg-green-700'
+              }`}
+            >
+              {isRegistering 
+                ? 'Registering...' 
+                : `Register ${selectedProducts.filter(id => !isProductRegistered(id)).length} Unregistered`
+              }
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDeleteSelected}
+              disabled={selectedProducts.filter(id => isProductRegistered(id)).length === 0 || isDeletingBulk}
+              className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                selectedProducts.filter(id => isProductRegistered(id)).length === 0 || isDeletingBulk
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-red-600 text-white hover:bg-red-700'
+              }`}
+            >
+              {isDeletingBulk 
+                ? 'Unregistering...' 
+                : `Unregister ${selectedProducts.filter(id => isProductRegistered(id)).length} Selected`
+              }
+            </button>
+
+            <button
+              onClick={fetchRegisteredProducts}
+              disabled={isLoadingRegisteredProducts}
+              className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                isLoadingRegisteredProducts
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-purple-600 text-white hover:bg-purple-700'
+              }`}
+            >
+              {isLoadingRegisteredProducts ? 'Loading...' : `Refresh Registered (${registeredProductIds.length})`}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDeleteAllRegistered}
+              disabled={registeredProductIds.length === 0 || isDeletingBulk}
+              className={`w-full px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                registeredProductIds.length === 0 || isDeletingBulk
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-red-600 text-white hover:bg-red-700'
+              }`}
+            >
+              {isDeletingBulk 
+                ? 'Unregistering All...' 
+                : `Unregister All Registered (${registeredProductIds.length})`
+              }
+            </button>
+          </div>
+
+          {/* Progress Indicator */}
+          {bulkRegistrationProgress && (
+            <div className="pt-4 border-t">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-md">
+                <div className="flex items-center space-x-2">
+                  <svg className="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <div className="flex-1">
+                    <div className="text-xs font-medium text-blue-900">{bulkRegistrationProgress.message}</div>
+                    {bulkRegistrationProgress.total > 0 && (
+                      <div className="text-xs text-blue-700 mt-1">
+                        {bulkRegistrationProgress.current} / {bulkRegistrationProgress.total}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="flex gap-2 items-end">
-                <button type="button" onClick={refreshLists} className="px-3 py-1 bg-purple-600 text-white rounded-md text-sm hover:bg-purple-700 disabled:bg-gray-300" disabled={isLoadingBrands || isLoadingCategories}>
-                  {isLoadingBrands || isLoadingCategories ? 'Refreshing...' : 'Refresh Brand and Category Lists'}
-                </button>
-                <button type="submit" className="px-3 py-1 bg-blue-600 text-white rounded-md text-sm hover:bg-blue-700">Search</button>
-                {/* <button type="button" onClick={handleResetSearch} className="px-3 py-1 bg-gray-200 text-gray-700 rounded-md text-sm hover:bg-gray-300">Reset</button> */}
+            </div>
+          )}
+
+          {/* Error Display */}
+          {fetchError && (
+            <div className="pt-4 border-t">
+              <div className="p-3 bg-red-50 border border-red-200 rounded-md">
+                <div className="text-xs text-red-600">{fetchError}</div>
               </div>
-            </form>
-          </div>
-        )}
-        <div className="px-6 py-4 border-b border-gray-200">
-          <div className="flex justify-between items-center">
-            <h2 className="text-lg font-medium text-gray-900">Nova Engel Product List</h2>
-            
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Main Content Area - Table */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <div className="bg-white border-b border-gray-200 px-6 py-4">
+          <div className="flex justify-between items-center flex-wrap gap-4">
             <div className="flex items-center space-x-4">
-              {/* Register to Shopify Button */}
-              <button
-                type="button" // Ensure this is explicitly set
-                onClick={handleRegisterToShopify}
-                disabled={selectedProducts.length === 0 || isRegistering}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  selectedProducts.length === 0 || isRegistering
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-green-600 text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2'
-                }`}
-              >
-                {isRegistering 
-                  ? 'Registering...' 
-                  : `Register ${selectedProducts.length} to Shopify`
-                }
-              </button>
-
-              {/* Refresh Registered Products Button */}
-              <button
-                onClick={fetchRegisteredProducts}
-                disabled={isLoadingRegisteredProducts}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  isLoadingRegisteredProducts
-                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-purple-600 text-white hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2'
-                }`}
-              >
-                {isLoadingRegisteredProducts ? (
-                  <div className="flex items-center">
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Loading...
-                  </div>
-                ) : (
-                  `Refresh Registered (${registeredProductIds.length})`
+              <h2 className="text-lg font-medium text-gray-900">Nova Engel Products</h2>
+              <div className="flex items-center space-x-4 text-sm text-gray-600">
+                {totalProductCount !== null && (
+                  <>
+                    <span>Total: {totalProductCount.toLocaleString()} products</span>
+                    <span>•</span>
+                  </>
                 )}
-              </button>
+                <span>Page: {fetchedProducts.length} products</span>
+                {selectedProducts.length > 0 && (
+                  <>
+                    <span>•</span>
+                    <span className="text-blue-600 font-medium">{selectedProducts.length} selected</span>
+                  </>
+                )}
+              </div>
+            </div>
+            
+            {/* Price Rate, Pagination and Refresh Controls */}
+            <div className="flex items-center space-x-4">
+              {/* Price Rate Display */}
+              <div className="flex items-center space-x-2 px-3 py-1 bg-gray-50 rounded-md border border-gray-200">
+                <span className="text-sm text-gray-600">Price Rate:</span>
+                <span className="text-sm font-medium text-gray-900">
+                  {priceRateLoading ? '...' : `${priceRate}x`}
+                </span>
+                <button
+                  onClick={() => setIsPriceRateModalOpen(true)}
+                  className="px-2 py-0.5 text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                >
+                  Edit
+                </button>
+              </div>
 
-              {/* Fetch Products Button */}
+              {/* Pagination Controls */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={handlePreviousPage}
+                  disabled={currentPage === 1 || isLoading}
+                  className={`px-3 py-1 text-sm font-medium rounded-md ${
+                    currentPage === 1 || isLoading
+                      ? 'text-gray-400 cursor-not-allowed'
+                      : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  Previous
+                </button>
+                
+                <form onSubmit={handlePageInputSubmit} className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-1">
+                    <input
+                      type="number"
+                      min="1"
+                      value={pageInput}
+                      onChange={handlePageInputChange}
+                      disabled={isLoading}
+                      className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md text-center focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
+                    />
+                    {totalPages && (
+                      <span className="text-sm text-gray-600">/ {totalPages}</span>
+                    )}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isLoading}
+                    className="px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md disabled:text-gray-400"
+                  >
+                    Go
+                  </button>
+                </form>
+                
+                <button
+                  onClick={handleNextPage}
+                  disabled={fetchedProducts.length < itemsPerPage || isLoading}
+                  className={`px-3 py-1 text-sm font-medium rounded-md ${
+                    fetchedProducts.length < itemsPerPage || isLoading
+                      ? 'text-gray-400 cursor-not-allowed'
+                      : 'text-gray-700 hover:bg-gray-100'
+                  }`}
+                >
+                  Next
+                </button>
+              </div>
+              
               <button
                 onClick={() => fetchNovaEngelProducts(currentPage)}
                 disabled={isLoading}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+                className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
                   isLoading
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                    : 'bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
                 }`}
               >
                 {isLoading ? (
@@ -515,162 +1222,59 @@ function NovaEngelProducts({ priceRate = 1 }) {
                     Loading...
                   </div>
                 ) : (
-                  'Refresh Products'
+                  'Refresh'
                 )}
-              </button>
-            </div>
-          </div>
-          
-          {fetchError && (
-            <div className="mt-2 text-sm text-red-600">
-              {fetchError}
-            </div>
-          )}
-          
-          {fetchedProducts.length > 0 && (
-            <div className="mt-2 text-sm text-green-600">
-              ✓ Successfully fetched {fetchedProducts.length} products
-            </div>
-          )}
-
-          {/* Registered Products Summary */}
-          {fetchedProducts.length > 0 && (
-            <div className="mt-2 text-sm text-gray-600">
-              📊 Current page: {fetchedProducts.filter(p => isProductRegistered(p.Id)).length} registered, {fetchedProducts.filter(p => !isProductRegistered(p.Id)).length} pending
-              {registeredProductIds.length > 0 && (
-                <span className="ml-2">| Total registered: {registeredProductIds.length}</span>
-              )}
-            </div>
-          )}
-
-          {/* Registration Results */}
-          {registrationResults.length > 0 && (
-            <div className="mt-4 p-3 bg-gray-50 rounded-md">
-              <h4 className="text-sm font-medium text-gray-900 mb-2">Registration Results:</h4>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {registrationResults.map((result, index) => (
-                  <div key={index} className={`text-xs ${
-                    result.success ? 'text-green-600' : 'text-red-600'
-                  }`}>
-                    {result.success ? '✓' : '✗'} Product {result.productId}: {result.message}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-        
-        {/* Top Navigation Bar */}
-        <div className="px-6 py-4 border-b border-gray-200">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center text-sm text-gray-700">
-              <span>
-                Showing {fetchedProducts.length} products on page {currentPage}
-                {fetchedProducts.length < itemsPerPage && (
-                  <span className="text-gray-500"> (end of data)</span>
-                )}
-              </span>
-              {selectedProducts.length > 0 && (
-                <span className="ml-4 text-blue-600 font-medium">
-                  {selectedProducts.length} products selected
-                </span>
-              )}
-            </div>
-            
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handlePreviousPage}
-                disabled={currentPage === 1 || isLoading}
-                className={`px-3 py-1 text-sm font-medium rounded-md ${
-                  currentPage === 1 || isLoading
-                    ? 'text-gray-400 cursor-not-allowed'
-                    : 'text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                Previous
-              </button>
-              
-              <form onSubmit={handlePageInputSubmit} className="flex items-center space-x-2">
-                <span className="text-sm text-gray-700">Page:</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={pageInput}
-                  onChange={handlePageInputChange}
-                  disabled={isLoading}
-                  className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
-                />
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md disabled:text-gray-400"
-                >
-                  Go
-                </button>
-              </form>
-              
-              <button
-                onClick={handleNextPage}
-                disabled={fetchedProducts.length < itemsPerPage || isLoading}
-                className={`px-3 py-1 text-sm font-medium rounded-md ${
-                  fetchedProducts.length < itemsPerPage || isLoading
-                    ? 'text-gray-400 cursor-not-allowed'
-                    : 'text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                Next
               </button>
             </div>
           </div>
         </div>
         
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  <input
-                    type="checkbox"
-                    checked={selectedProducts.length === fetchedProducts.filter(p => !isProductRegistered(p.Id)).length && fetchedProducts.length > 0}
-                    ref={(input) => {
-                      if (input) {
-                        const selectableProducts = fetchedProducts.filter(p => !isProductRegistered(p.Id));
-                        const selectedSelectable = selectedProducts.filter(id => 
-                          selectableProducts.some(p => p.Id === id)
-                        );
-                        input.indeterminate = selectedSelectable.length > 0 && selectedSelectable.length < selectableProducts.length;
-                      }
-                    }}
-                    onChange={(e) => handleSelectAll(e.target.checked)}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                  />
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  ID
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Title
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Brand
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Price
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Stock
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Category
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  EAN
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Status
-                </th>
-              </tr>
-            </thead>
+        <div className="flex-1 overflow-auto">
+          <div className="px-6 py-4">
+            {/* Table */}
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <input
+                        type="checkbox"
+                        checked={selectedProducts.length === fetchedProducts.length && fetchedProducts.length > 0}
+                        ref={(input) => {
+                          if (input) {
+                            input.indeterminate = selectedProducts.length > 0 && selectedProducts.length < fetchedProducts.length;
+                          }
+                        }}
+                        onChange={(e) => handleSelectAll(e.target.checked)}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      ID
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Title
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Brand
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Price
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Stock
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Category
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      EAN
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
+                    </th>
+                  </tr>
+                </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {isLoading ? (
                 <tr>
@@ -691,9 +1295,15 @@ function NovaEngelProducts({ priceRate = 1 }) {
                   </td>
                 </tr>
               ) : (
-                fetchedProducts.map((product) => {
+                fetchedProducts
+                  .filter((product) => {
+                    const isRegistered = isProductRegistered(product.Id);
+                    if (statusFilter === 'registered') return isRegistered;
+                    if (statusFilter === 'pending') return !isRegistered;
+                    return true;
+                  })
+                  .map((product) => {
                   const isRegistered = isProductRegistered(product.Id);
-                  const isSelectable = !isRegistered;
                   
                   return (
                     <tr key={product.Id} className={`hover:bg-gray-50 ${isRegistered ? 'bg-green-50 border-l-4 border-l-green-400' : ''}`}>
@@ -702,11 +1312,8 @@ function NovaEngelProducts({ priceRate = 1 }) {
                           type="checkbox"
                           checked={selectedProducts.includes(product.Id)}
                           onChange={(e) => handleProductSelect(product.Id, e.target.checked)}
-                          disabled={!isSelectable}
-                          className={`h-4 w-4 focus:ring-blue-500 border-gray-300 rounded ${
-                            isSelectable ? 'text-blue-600' : 'text-gray-400 cursor-not-allowed'
-                          }`}
-                          title={isRegistered ? 'Product already registered in Shopify' : 'Select product for registration'}
+                          className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                          title={isRegistered ? 'Select to unregister from Shopify' : 'Select product for registration or unregistration'}
                         />
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
@@ -782,74 +1389,19 @@ function NovaEngelProducts({ priceRate = 1 }) {
                   );
                 })
               )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Bottom Navigation Bar */}
-        <div className="px-6 py-4 border-t border-gray-200">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center text-sm text-gray-700">
-              <span>
-                Showing {fetchedProducts.length} products on page {currentPage}
-                {fetchedProducts.length < itemsPerPage && (
-                  <span className="text-gray-500"> (end of data)</span>
-                )}
-              </span>
-              {selectedProducts.length > 0 && (
-                <span className="ml-4 text-blue-600 font-medium">
-                  {selectedProducts.length} products selected
-                </span>
-              )}
-            </div>
-            
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={handlePreviousPage}
-                disabled={currentPage === 1 || isLoading}
-                className={`px-3 py-1 text-sm font-medium rounded-md ${
-                  currentPage === 1 || isLoading
-                    ? 'text-gray-400 cursor-not-allowed'
-                    : 'text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                Previous
-              </button>
-              
-              <form onSubmit={handlePageInputSubmit} className="flex items-center space-x-2">
-                <span className="text-sm text-gray-700">Page:</span>
-                <input
-                  type="number"
-                  min="1"
-                  value={pageInput}
-                  onChange={handlePageInputChange}
-                  disabled={isLoading}
-                  className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
-                />
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md disabled:text-gray-400"
-                >
-                  Go
-                </button>
-              </form>
-              
-              <button
-                onClick={handleNextPage}
-                disabled={fetchedProducts.length < itemsPerPage || isLoading}
-                className={`px-3 py-1 text-sm font-medium rounded-md ${
-                  fetchedProducts.length < itemsPerPage || isLoading
-                    ? 'text-gray-400 cursor-not-allowed'
-                    : 'text-gray-700 hover:bg-gray-100'
-                }`}
-              >
-                Next
-              </button>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Price Rate Modal */}
+      <PriceRateModal
+        isOpen={isPriceRateModalOpen}
+        onClose={() => setIsPriceRateModalOpen(false)}
+        onRateUpdate={handlePriceRateUpdate}
+      />
     </div>
   )
 }

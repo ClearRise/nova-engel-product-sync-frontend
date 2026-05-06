@@ -22,6 +22,10 @@ export default defineConfig(({ mode }) => {
       'import.meta.env.VITE_NOVA_ENGEL_PASSWORD': JSON.stringify(env.NOVA_ENGEL_PASSWORD),
     },
     server: {
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true,
+      open: true,
       proxy: {
         '/api': {
           target: 'http://localhost:80',

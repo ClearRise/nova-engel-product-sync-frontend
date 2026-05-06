@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../apiClient';
 
 function PriceRateModal({ isOpen, onClose, onRateUpdate }) {
   const [rate, setRate] = useState('');
@@ -14,7 +15,7 @@ function PriceRateModal({ isOpen, onClose, onRateUpdate }) {
   const fetchCurrentRate = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/price-rate');
+      const response = await apiFetch('/api/price-rate');
       const data = await response.json();
       
       if (data.success) {
@@ -41,7 +42,7 @@ function PriceRateModal({ isOpen, onClose, onRateUpdate }) {
       setLoading(true);
       setError('');
       
-      const response = await fetch('/api/price-rate', {
+      const response = await apiFetch('/api/price-rate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
